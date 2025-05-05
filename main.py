@@ -5,7 +5,6 @@ import os
 from dotenv import load_dotenv 
 from supabase import create_client, Client
 from postgrest.exceptions import APIError as PostgrestAPIError
-import json
 import logging
 
 logging.basicConfig(level=logging.INFO)
@@ -70,8 +69,6 @@ async def stripe_webhook(request: Request):
             stripe_payment_intent_id = payment_intent['id']
             amount = payment_intent['amount'] / 100.0 
             currency = payment_intent['currency']
-            user_id_from_metadata = payment_intent['metadata'].get('user_id')
-
 
             logger.info(f"Processing payment_intent.succeeded for PI: {stripe_payment_intent_id}, Booking ID: {booking_id}")
 
@@ -104,12 +101,13 @@ async def stripe_webhook(request: Request):
                 logger.warning(f"Webhook Warning: Amount mismatch for booking {booking_id}. PI amount: {amount}, DB amount: {booking_data['total_price']}")
             
             payment_record_id = None
+
             try:
                 payment_response = supabase.from_('payments').select('id').eq('booking_id', booking_id).single().execute()
                 payment_record_id = payment_response.data['id']
                 logger.info(f'Payment record found for booking {booking_id}: {payment_record_id}. Updating status.')
 
-                update_response = supabase.from_('payments').update({
+                supabase.from_('payments').update({
                     'status': 'succeeded',
                     'gateway_payment_id': stripe_payment_intent_id,
                     'amount': amount,
@@ -129,25 +127,25 @@ async def stripe_webhook(request: Request):
                             'gateway_payment_id': stripe_payment_intent_id,
                             'amount': amount,
                             'currency': currency,
-                        }).select('id').single().execute() 
+                        }).select('id').single().execute()
 
                         payment_record_id = insert_response.data['id']
                         logger.info(f"New payment record created for booking {booking_id}: {payment_record_id}")
                     
                     except Exception as insert_error:
-                           logger.error(f"Supabase Error: Failed to insert new payment record for booking {booking_id} - {insert_error}", exc_info=True)
-                           raise HTTPException(status_code=500, detail=f"Database error inserting payment: {insert_error}")
+                        logger.error(f"Supabase Error: Failed to insert new payment record for booking {booking_id} - {insert_error}", exc_info=True)
+                        raise HTTPException(status_code=500, detail=f"Database error inserting payment: {insert_error}")
 
                 else:
                     logger.error(f"Supabase PostgREST Error fetching/updating payment record for booking {booking_id}: {e}")
                     raise HTTPException(status_code=500, detail=f"Database error fetching/updating payment: {e.message}")
             
             except Exception as e:
-                 logger.error(f"Unexpected Supabase Error fetching/updating payment record for booking {booking_id}: {e}", exc_info=True)
-                 raise HTTPException(status_code=500, detail=f"Unexpected database error fetching/updating payment: {e}")
+                logger.error(f"Unexpected Supabase Error fetching/updating payment record for booking {booking_id}: {e}", exc_info=True)
+                raise HTTPException(status_code=500, detail=f"Unexpected database error fetching/updating payment: {e}")
 
             try:
-                booking_update_response = supabase.from_('bookings').update({
+                supabase.from_('bookings').update({
                    'status': 'confirmed', 
                    'payment_id': payment_record_id
                 }).eq('id', booking_id).execute()
@@ -156,11 +154,6 @@ async def stripe_webhook(request: Request):
                 logger.error(f"Unexpected Supabase Error updating booking status for {booking_id}: {e}", exc_info=True)
                 raise HTTPException(status_code=500, detail=f"Unexpected database error updating booking status: {e}")
 
-            booking_update_response = supabase.from_('bookings').update({
-                'status': 'confirmed', 
-                'payment_id': payment_record_id 
-            }).eq('id', booking_id).execute()
-
             logger.info(f"Successfully processed payment_intent.succeeded for booking {booking_id}. Booking status updated to 'confirmed'.")
             return JSONResponse(content={"received": True, "status": "booking_confirmed"}, status_code=200)
         
@@ -168,7 +161,6 @@ async def stripe_webhook(request: Request):
             payment_intent = event_object
             booking_id = payment_intent['metadata'].get('booking_id')
             stripe_payment_intent_id = payment_intent['id']
-            user_id_from_metadata = payment_intent['metadata'].get('user_id')
 
             logger.warning(f"Processing payment_intent.payment_failed for PI: {stripe_payment_intent_id}, Booking ID: {booking_id}")
 
@@ -182,17 +174,12 @@ async def stripe_webhook(request: Request):
                 payment_record_id = payment_response.data['id']
                 logger.info(f"Payment record found for booking {booking_id}: {payment_record_id}. Updating status to failed.")
 
-                update_response = supabase.from_('payments').update({
+                supabase.from_('payments').update({
                     'status': 'failed',
                     'gateway_payment_id': stripe_payment_intent_id,
                     'updated_at': 'now()'
                 }).eq('id', payment_record_id).execute()
 
-                if booking_update_response.error:
-                    logger.error(f"Supabase Error: Failed to update booking status for {booking_id} - {booking_update_response.error}")
-                    raise HTTPException(status_code=500, detail=f"Database error updating booking status: {booking_update_response.error.message}")
-                
-            
             except PostgrestAPIError as e:
                 if e.code == 'PGRST116':
                     logger.warning(f"Payment record not found for booking {booking_id} on failed event. Creating new record in failed state.")
@@ -200,8 +187,8 @@ async def stripe_webhook(request: Request):
                     booking_user_id = booking_response.data['user_id'] if booking_response.data else None
 
                     if not booking_user_id:
-                            logger.warning(f"Webhook Warning: Cannot find user_id for booking {booking_id} on failed event.")
-                            return JSONResponse(content={"received": True, "message": "Booking user_id not found"}, status_code=200)
+                        logger.warning(f"Webhook Warning: Cannot find user_id for booking {booking_id} on failed event.")
+                        return JSONResponse(content={"received": True, "message": "Booking user_id not found"}, status_code=200)
 
                     try:
                         insert_response = supabase.from_('payments').insert({
@@ -217,8 +204,8 @@ async def stripe_webhook(request: Request):
                         logger.info(f"New failed payment record created for booking {booking_id}: {payment_record_id}")
 
                     except Exception as insert_error:
-                            logger.error(f"Supabase Error: Failed to insert new failed payment record for booking {booking_id} - {insert_error}", exc_info=True)
-                            raise HTTPException(status_code=500, detail=f"Database error inserting failed payment: {insert_error}")
+                        logger.error(f"Supabase Error: Failed to insert new failed payment record for booking {booking_id} - {insert_error}", exc_info=True)
+                        raise HTTPException(status_code=500, detail=f"Database error inserting failed payment: {insert_error}")
                     
                 else:
                     logger.error(f"Supabase PostgREST Error fetching/updating payment record for booking {booking_id} on failed event: {e}")
@@ -229,14 +216,14 @@ async def stripe_webhook(request: Request):
                 raise HTTPException(status_code=500, detail=f"Unexpected database error fetching/updating payment on failed event: {e}")
 
             try:
-                booking_update_response = supabase.from_('bookings').update({
+                supabase.from_('bookings').update({
                     'status': 'payment_failed',
                     'payment_id': payment_record_id
                 }).eq('id', booking_id).execute()
             
             except Exception as e:
-                  logger.error(f"Unexpected Supabase Error updating booking status to failed for {booking_id}: {e}", exc_info=True)
-                  raise HTTPException(status_code=500, detail=f"Unexpected database error updating booking status to failed: {e}")
+                logger.error(f"Unexpected Supabase Error updating booking status to failed for {booking_id}: {e}", exc_info=True)
+                raise HTTPException(status_code=500, detail=f"Unexpected database error updating booking status to failed: {e}")
 
 
             logger.info(f"Successfully processed payment_intent.payment_failed for booking {booking_id}. Booking status updated to 'payment_failed'.")
@@ -247,8 +234,8 @@ async def stripe_webhook(request: Request):
             return JSONResponse(content={"received": True, "message": "Event type not handled"}, status_code=200)
 
     except HTTPException as e:
-         logger.error(f"Webhook Processing HTTPException: {e.detail}", exc_info=True) 
-         raise e
+        logger.error(f"Webhook Processing HTTPException: {e.detail}", exc_info=True) 
+        raise e
 
     except Exception as e:
         logger.error(f"Webhook Processing Unexpected Error: {e}", exc_info=True) 

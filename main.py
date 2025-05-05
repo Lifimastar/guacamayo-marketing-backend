@@ -98,6 +98,8 @@ async def stripe_webhook(request: Request):
 
             if abs(booking_data['total_price'] - amount) > 0.01: 
                 logger.warning(f"Webhook Warning: Amount mismatch for booking {booking_id}. PI amount: {amount}, DB amount: {booking_data['total_price']}")
+            
+            payment_record_id = None
 
             try:
                 payment_response = supabase.from_('payments').select('id').eq('booking_id', booking_id).single().execute()
@@ -121,7 +123,32 @@ async def stripe_webhook(request: Request):
                     'gateway_payment_id': stripe_payment_intent_id,
                     'amount': amount,
                     'currency': currency,
-                }).select('id').single().execute()
+                }).execute()
+
+                try:
+                    payment_response = supabase.from_('payments').select('id').eq('booking_id', booking_id).single().execute()
+                    payment_record_id = payment_response.data['id']
+                    logger.info(f"Payment record found for booking {booking_id}: {payment_record_id}. Updating status.")
+
+                    update_response = supabase.from_('payments').update({
+                        'status': 'succeeded',
+                        'gateway_payment_id': stripe_payment_intent_id,
+                        'amount': amount,
+                        'currency': currency,
+                        'updated_at': 'now()'
+                    }).eq('id', payment_record_id).execute()
+
+
+                except Exception as db_fetch_error:
+                    logger.warning(f"Payment record not found for booking {booking_id} on succeeded event. Creating new record.")
+                    insert_response = supabase.from_('payments').insert({
+                        'booking_id': booking_id,
+                        'user_id': booking_data['user_id'],
+                        'status': 'succeeded',
+                        'gateway_payment_id': stripe_payment_intent_id,
+                        'amount': amount,
+                        'currency': currency,
+                    }).select('id').single().execute()
 
                 if insert_response.error:
                     logger.error(f"Supabase Error: Failed to insert new payment record for booking {booking_id} - {insert_response.error}")

@@ -21,7 +21,6 @@ supabase_url = os.getenv('SUPABASE_URL')
 supabase_key = os.getenv('SUPABASE_SERVICE_ROLE_KEY')
 if not supabase_url or not supabase_key:
     logger.error("Supabase URL or Service Role Key not configured!")
-    raise Exception("Backend configuration error")
 
 
 supabase: Client = create_client(supabase_url, supabase_key)
@@ -52,7 +51,8 @@ async def _handle_payment_intent_succeeded(payment_intent: dict):
     try:
         booking_response = supabase.from_('bookings').select('id, user_id, total_price').eq('id', booking_id).single().execute()
         booking_data = booking_response.data 
-        logger.info(f'Booking {booking_id} found.')
+        if booking_data:
+            logger.info(f'Booking {booking_id} found.')
     except APIError as e:
         if e.code == 'PGRST116' and '0 rows' in e.message:
             logger.warning(f"Webhook Warning: Booking {booking_id} not found in DB for PI {stripe_payment_intent_id}. Cannot process succeeded event.")
@@ -65,11 +65,15 @@ async def _handle_payment_intent_succeeded(payment_intent: dict):
         logger.error(f"Unexpected Error fetching booking {booking_id}: {e}", exc_info=True)
         raise HTTPException(status_code=500, detail=f'Unexpected error fetching booking: {e}')
 
-    if abs(booking_data['total_price'] - amount) > 0.01:
-        logger.warning(f"Webhook Warning: Amount mismatch for booking {booking_id}. PI amount: {amount}, DB amount: {booking_data['total_price']}")
+    if 'total_price' in booking_data and booking_data['total_price'] is not None:
+        try:
+            db_amount = float(booking_data['total_price']) 
+            if abs(db_amount - amount) > 0.01:
+                logger.warning(f"Webhook Warning: Amount mismatch for booking {booking_id}. PI amount: {amount}, DB amount: {db_amount}")
+        except (ValueError, TypeError):
+            logger.warning(f"Webhook Warning: Could not convert booking {booking_id} total_price to float for comparison.")
 
     payment_record_data = None
-
     try:
         payment_response = supabase.from_('payments').select('id').eq('booking_id', booking_id).single().execute()
         payment_record_data = payment_response.data 
@@ -118,16 +122,18 @@ async def _handle_payment_intent_succeeded(payment_intent: dict):
         inserted_payment_data = None
         try:
             inserted_payment_data = insert_response.data 
+            if inserted_payment_data is None:
+                logger.error(f"Supabase Error: Inserted payment data is None for booking {booking_id} after insert execution.")
+                if insert_response.error:
+                    logger.error(f"Supabase Error: Insert error details - {insert_response.error}")
+                raise HTTPException(status_code=500, detail=f"Database error inserting payment: Inserted data is null or error: {insert_response.error.message if insert_response.error else 'Unknown error'}")
+            
         except APIError as e:
             logger.error(f"Supabase API Error after inserting payment for booking {booking_id}: {e}", exc_info=True)
             raise HTTPException(status_code=500, detail=f"Database error after inserting payment: {e.message}")
         except Exception as e:
             logger.error(f"Unexpected Error after inserting payment for booking {booking_id}: {e}", exc_info=True)
             raise HTTPException(status_code=500, detail=f"Unexpected error after inserting payment: {e}")
-
-        if inserted_payment_data is None:
-            logger.error(f"Supabase Error: Inserted payment data is None for booking {booking_id} after successful insert execution.")
-            raise HTTPException(status_code=500, detail="Database error inserting payment: Inserted data is null.")
 
         payment_record_id = inserted_payment_data['id']
         logger.info(f"New payment record created for booking {booking_id} with ID: {payment_record_id}")
@@ -232,17 +238,18 @@ async def _handle_payment_intent_failed(payment_intent: dict):
         inserted_payment_data = None
         try:
             inserted_payment_data = insert_response.data
+            if inserted_payment_data is None:
+                logger.error(f"Supabase Error: Inserted failed payment data is None for booking {booking_id} after insert execution.")
+                if insert_response.error:
+                    logger.error(f"Supabase Error: Insert error details - {insert_response.error}")
+                raise HTTPException(status_code=500, detail=f"Database error inserting failed payment: Inserted data is null or error: {insert_response.error.message if insert_response.error else 'Unknown error'}")
+
         except APIError as e:
             logger.error(f"Supabase API Error after inserting failed payment for booking {booking_id}: {e}", exc_info=True)
             raise HTTPException(status_code=500, detail=f"Database error after inserting failed payment: {e.message}")
         except Exception as e:
             logger.error(f"Unexpected Error after inserting failed payment for booking {booking_id}: {e}", exc_info=True)
             raise HTTPException(status_code=500, detail=f"Unexpected error after inserting failed payment: {e}")
-
-        if inserted_payment_data is None:
-            logger.error(f"Supabase Error: Inserted failed payment data is None for booking {booking_id} after successful insert execution.")
-            raise HTTPException(status_code=500, detail="Database error inserting failed payment: Inserted data is null.")
-
 
         payment_record_id = inserted_payment_data['id']
         logger.info(f"New failed payment record created for booking {booking_id} with ID: {payment_record_id}")

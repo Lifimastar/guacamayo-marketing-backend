@@ -92,10 +92,6 @@ async def _handle_payment_intent_succeeded(payment_intent: dict):
             'updated_at': 'now()'
         }).eq('id', payment_record_id).execute() 
 
-        if update_response.error:
-            logger.error(f"Supabase Error: Failed to update payment record {payment_record_id} for booking {booking_id} - {update_response.error}", exc_info=True)
-            raise HTTPException(status_code=500, detail=f"Database error updating payment: {update_response.error.message}")
-
     else:
         logger.info(f"Creating new payment record for booking {booking_id}.")
         insert_response: PostgrestAPIResponse = supabase.from_('payments').insert({
@@ -138,10 +134,6 @@ async def _handle_payment_intent_succeeded(payment_intent: dict):
         'payment_id': payment_record_id 
     }).eq('id', booking_id).execute() 
 
-    if booking_update_response.error:
-        logger.error(f"Supabase Error: Failed to update booking status for {booking_id} - {booking_update_response.error}", exc_info=True)
-        raise HTTPException(status_code=500, detail=f"Database error updating booking status: {booking_update_response.error.message}")
-
     logger.info(f"Successfully processed payment_intent.succeeded for booking {booking_id}. Booking status updated to 'confirmed'.")
     return True 
 
@@ -174,10 +166,6 @@ async def _handle_payment_intent_failed(payment_intent: dict):
             'gateway_payment_id': stripe_payment_intent_id,
             'updated_at': 'now()'
         }).eq('id', payment_record_id).execute()
-
-        if update_response.error:
-            logger.error(f"Supabase Error: Failed to update payment record {payment_record_id} to failed for booking {booking_id} - {update_response.error}", exc_info=True)
-            raise HTTPException(status_code=500, detail=f"Database error updating payment to failed: {update_response.error.message}")
 
     else:
         logger.warning(f"Payment record not found for booking {booking_id} on failed event. Creating new record in failed state.")
@@ -232,11 +220,6 @@ async def _handle_payment_intent_failed(payment_intent: dict):
         'status': 'payment_failed',
         'payment_id': payment_record_id
     }).eq('id', booking_id).execute()
-
-    if booking_update_response.error:
-        logger.error(f"Supabase Error: Failed to update booking status to failed for {booking_id} - {booking_update_response.error}", exc_info=True)
-        raise HTTPException(status_code=500, detail=f"Database error updating booking status to failed: {booking_update_response.error.message}")
-
 
     logger.info(f"Successfully processed payment_intent.payment_failed for booking {booking_id}. Booking status updated to 'payment_failed'.")
     return True 

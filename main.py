@@ -4,13 +4,12 @@ import stripe
 import os
 from dotenv import load_dotenv
 from supabase import create_client, Client
-from supabase.lib.client_options import ClientOptions
 import logging 
 from postgrest.exceptions import APIError
+from postgrest import APIResponse as PostgrestAPIResponse
 
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
-
 
 load_dotenv()
 
@@ -21,17 +20,15 @@ supabase_url = os.getenv('SUPABASE_URL')
 supabase_key = os.getenv('SUPABASE_SERVICE_ROLE_KEY')
 if not supabase_url or not supabase_key:
     logger.error("Supabase URL or Service Role Key not configured!")
-
+    raise Exception("Backend configuration error: Supabase keys missing")
 
 supabase: Client = create_client(supabase_url, supabase_key)
-
 
 app = FastAPI()
 
 @app.get("/")
 async def read_root():
     return {"message": "Backend is running"}
-
 
 async def _handle_payment_intent_succeeded(payment_intent: dict):
     """Maneja el evento payment_intent.succeeded."""
@@ -46,17 +43,21 @@ async def _handle_payment_intent_succeeded(payment_intent: dict):
     if not booking_id:
         logger.warning(f"Webhook Warning: payment_intent.succeeded event missing booking_id in metadata for PI {stripe_payment_intent_id}")
         return True
-
-
-    booking_response = supabase.from_('bookings').select('id, user_id, total_price').eq('id', booking_id).maybe_single().execute()
-
-    booking_data = booking_response.data if booking_response else None
-
+    
+    booking_data = None
+    try:
+        booking_response = supabase.from_('bookings').select('id, user_id, total_price').eq('id', booking_id).maybe_single().execute()
+        booking_data = booking_response.data if booking_response else None
+        if booking_data:
+            logger.info(f"Booking {booking_id} found.")
+    except APIError as e:
+        raise HTTPException(status_code=500, detail=f"Database error fetching booking: {e.message}")
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Unexpected error fetching booking: {e}")
+    
     if booking_data is None:
         logger.warning(f"Webhook Warning: Booking {booking_id} not found in DB for PI {stripe_payment_intent_id}. Cannot process succeeded event.")
         return True
-
-    logger.info(f"Booking {booking_id} found.")
 
     if 'total_price' in booking_data and booking_data['total_price'] is not None:
         try:
@@ -97,7 +98,7 @@ async def _handle_payment_intent_succeeded(payment_intent: dict):
 
     else:
         logger.info(f"Creating new payment record for booking {booking_id}.")
-        insert_response = supabase.from_('payments').insert({
+        insert_response: PostgrestAPIResponse = supabase.from_('payments').insert({
             'booking_id': booking_id,
             'user_id': booking_data['user_id'], 
             'status': 'succeeded',
@@ -105,10 +106,6 @@ async def _handle_payment_intent_succeeded(payment_intent: dict):
             'amount': amount,
             'currency': currency,
         }).execute()
-
-        if insert_response.error: 
-            logger.error(f"Supabase Error: Failed to insert new payment record for booking {booking_id} - {insert_response.error}", exc_info=True)
-            raise HTTPException(status_code=500, detail=f"Database error inserting payment: {insert_response.error.message}")
 
         inserted_payment_data = None
         try:
@@ -196,7 +193,7 @@ async def _handle_payment_intent_failed(payment_intent: dict):
 
         booking_user_id = booking_user_data['user_id']
 
-        insert_response = supabase.from_('payments').insert({
+        insert_response: PostgrestAPIResponse = supabase.from_('payments').insert({
             'booking_id': booking_id,
             'user_id': booking_user_id, 
             'status': 'failed',
@@ -204,10 +201,6 @@ async def _handle_payment_intent_failed(payment_intent: dict):
             'amount': amount, 
             'currency': currency, 
         }).execute() 
-
-        if insert_response.error: 
-              logger.error(f"Supabase Error: Failed to insert new payment record for booking {booking_id} - {insert_response.error}", exc_info=True)
-              raise HTTPException(status_code=500, detail=f"Database error inserting payment: {insert_response.error.message}")
 
         inserted_payment_data = None
         try:

@@ -9,6 +9,7 @@ from postgrest.exceptions import APIError
 from postgrest import APIResponse as PostgrestAPIResponse
 from typing import Dict, Any
 from gotrue.errors import AuthApiError
+from gotrue.types import User
 
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
@@ -286,7 +287,7 @@ async def stripe_webhook(request: Request):
 
 # --- Lógica de Seguridad: Dependencia para verificar si el usuario que llama es Admin ---
 
-async def get_current_admin_user(request: Request) -> Dict[str, Any]:
+async def get_current_admin_user(request: Request) -> User:
     auth_header = request.headers.get('Authorization')
     if not auth_header:
         logger.warning("Admin endpoint called without Authorization header")
@@ -323,8 +324,9 @@ async def get_current_admin_user(request: Request) -> Dict[str, Any]:
 
 # --- Endpoint para Eliminar Usuario (Solo Admin) ---
 @app.delete("/admin/users/{user_id}") 
-async def delete_user_by_admin(user_id: str, current_admin_user: Dict[str, Any] = Depends(get_current_admin_user)):
-    logger.info(f"Admin user {current_admin_user['id']} attempting to delete user {user_id}")
+async def delete_user_by_admin(user_id: str, current_admin_user: User = Depends(get_current_admin_user)):
+
+    logger.info(f"Admin user {current_admin_user.id} attempting to delete user {user_id}")
     logger.info(f"Attempting to delete user with ID: {user_id}")
 
     try:
@@ -333,7 +335,7 @@ async def delete_user_by_admin(user_id: str, current_admin_user: Dict[str, Any] 
         logger.info(f"Response from supabase.auth.admin.delete_user: {delete_response}")
 
         if delete_response is None:
-            logger.info(f"User {user_id} deleted successfully by admin {current_admin_user['id']}")
+            logger.info(f"User {user_id} deleted successfully by admin {current_admin_user.id}")
             return JSONResponse(content={"message": "User deleted successfully"}, status_code=200)
         else:
             logger.error(f"Unexpected response from supabase.auth.admin.delete_user for user {user_id}: {delete_response}")

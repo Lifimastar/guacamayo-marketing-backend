@@ -1,4 +1,4 @@
-from fastapi import FastAPI, Request, HTTPException
+from fastapi import FastAPI, Request, HTTPException, Depends
 from fastapi.responses import JSONResponse
 import stripe
 import os
@@ -7,6 +7,8 @@ from supabase import create_client, Client
 import logging 
 from postgrest.exceptions import APIError
 from postgrest import APIResponse as PostgrestAPIResponse
+from typing import Dict, Any
+from gotrue.errors import AuthApiError
 
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
@@ -281,3 +283,69 @@ async def stripe_webhook(request: Request):
         raise HTTPException(status_code=500, detail="An unexpected error occurred during webhook processing.") 
 
     return JSONResponse(content={"received": True, "event_type": event_type, "processed": processed}, status_code=200)
+
+# --- Lógica de Seguridad: Dependencia para verificar si el usuario que llama es Admin ---
+
+async def get_current_admin_user(request: Request) -> Dict[str, Any]:
+    auth_header = request.headers.get('Authorization')
+    if not auth_header:
+        logger.warning("Admin endpoint called without Authorization header")
+        raise HTTPException(status_code=401, detail="Authorization header missing")
+    token = auth_header.split(' ')[1] if ' ' in auth_header else auth_header
+
+    try:
+        user_response = supabase.auth.get_user(token)
+        user = user_response.user
+
+        if not user:
+            logger.warning(f"Admin endpoint called with invalid/expired token: {token}")
+            raise HTTPException(status_code=401, detail="Invalid or expired token")
+
+        profile_response = supabase.from_('profiles').select('role').eq('id', user.id).single().execute()
+
+        if profile_response.data is None:
+            logger.warning(f"Admin endpoint called by user {user.id} with no profile found.")
+            raise HTTPException(status_code=403, detail="User profile not found")
+
+        if profile_response.data['role'] != 'admin':
+            logger.warning(f"Admin endpoint called by non-admin user {user.id} with role {profile_response.data['role']}")
+            raise HTTPException(status_code=403, detail="User is not an administrator")
+
+        logger.info(f"Admin endpoint accessed by admin user {user.id}")
+        return user
+
+    except APIError as e:
+        logger.error(f"Supabase API Error verifying admin role for token: {e}", exc_info=True)
+        raise HTTPException(status_code=500, detail=f"Database error verifying admin role: {e.message}")
+    except Exception as e:
+        logger.error(f"Unexpected Error verifying admin role for token: {e}", exc_info=True)
+        raise HTTPException(status_code=500, detail=f"Unexpected error verifying admin role: {e}")
+
+# --- Endpoint para Eliminar Usuario (Solo Admin) ---
+@app.delete("/admin/users/{user_id}") 
+async def delete_user_by_admin(user_id: str, current_admin_user: Dict[str, Any] = Depends(get_current_admin_user)):
+    logger.info(f"Admin user {current_admin_user['id']} attempting to delete user {user_id}")
+
+    try:
+        delete_response = supabase.auth.admin.delete_user(user_id) 
+
+        if delete_response is None:
+            logger.info(f"User {user_id} deleted successfully by admin {current_admin_user['id']}")
+            return JSONResponse(content={"message": "User deleted successfully"}, status_code=200)
+        else:
+            logger.error(f"Unexpected response from supabase.auth.admin.delete_user for user {user_id}: {delete_response}")
+            raise HTTPException(status_code=500, detail="Unexpected response from user deletion.")
+
+    except AuthApiError as e: 
+         logger.error(f"Supabase Auth Admin Error deleting user {user_id}: {e}", exc_info=True)
+         if e.status == 404:
+            raise HTTPException(status_code=404, detail=f"User with ID {user_id} not found in Auth.")
+         elif e.status == 403:
+            raise HTTPException(status_code=403, detail="Auth Admin permission denied. Check service_role_key.")
+         else:
+            raise HTTPException(status_code=500, detail=f"Supabase Auth Admin error: {e.message}")
+
+    except Exception as e:
+        logger.error(f"Unexpected Error deleting user {user_id}: {e}", exc_info=True)
+        raise HTTPException(status_code=500, detail=f"An unexpected error occurred while deleting user: {e}")
+

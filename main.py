@@ -325,9 +325,12 @@ async def get_current_admin_user(request: Request) -> Dict[str, Any]:
 @app.delete("/admin/users/{user_id}") 
 async def delete_user_by_admin(user_id: str, current_admin_user: Dict[str, Any] = Depends(get_current_admin_user)):
     logger.info(f"Admin user {current_admin_user['id']} attempting to delete user {user_id}")
+    logger.info(f"Attempting to delete user with ID: {user_id}")
 
     try:
+        logger.info(f"Calling supabase.auth.admin.delete_user({user_id})")
         delete_response = supabase.auth.admin.delete_user(user_id) 
+        logger.info(f"Response from supabase.auth.admin.delete_user: {delete_response}")
 
         if delete_response is None:
             logger.info(f"User {user_id} deleted successfully by admin {current_admin_user['id']}")

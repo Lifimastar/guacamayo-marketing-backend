@@ -396,17 +396,17 @@ async def create_payment_intent(
     logger.info(f"User {current_user.id} creating Payment Intent for booking {request_body.bookingId}")
 
     try:
-        customer = await stripe.Customer.create(
+        customer = stripe.Customer.create(
             metadata={'user_id': current_user.id}
         )
 
-        ephemeral_key = await stripe.EphemeralKey.create(
+        ephemeral_key = stripe.EphemeralKey.create(
             customer=customer.id,
             stripe_version='2024-04-10', 
         )
 
-        payment_intent = await stripe.PaymentIntent.create(
-            amount=(request_body.amount * 100).toInt(), 
+        payment_intent = stripe.PaymentIntent.create(
+            amount=int(request_body.amount * 100), 
             currency=request_body.currency,
             customer=customer.id,
             automatic_payment_methods={'enabled': True},
@@ -423,8 +423,8 @@ async def create_payment_intent(
             'gateway_payment_id': payment_intent.id, 
         }).select('id').single().execute()
 
-        if payment_insert_response.error:
-            raise Exception(f"Failed to create pending payment record: {payment_insert_response.error.message}")
+        if payment_insert_response.data is None:
+            raise Exception(f"Failed to create pending payment record: {payment_insert_response.error.message if payment_insert_response.error else 'Unknown error'}")
 
         payment_id = payment_insert_response.data['id']
 

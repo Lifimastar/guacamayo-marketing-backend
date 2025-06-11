@@ -8,6 +8,7 @@ import logging
 from postgrest.exceptions import APIError
 from postgrest import APIResponse as PostgrestAPIResponse
 from typing import Dict, Any
+from pydantic import BaseModel
 from gotrue.errors import AuthApiError
 from gotrue.types import User
 
@@ -26,6 +27,11 @@ if not supabase_url or not supabase_key:
     raise Exception("Backend configuration error: Supabase keys missing")
 
 supabase: Client = create_client(supabase_url, supabase_key)
+
+class CreatePaymentIntentRequest(BaseModel):
+    bookingId: str
+    amount: float 
+    currency: str 
 
 app = FastAPI()
 
@@ -353,4 +359,86 @@ async def delete_user_by_admin(user_id: str, current_admin_user: User = Depends(
     except Exception as e:
         logger.error(f"Unexpected Error deleting user {user_id}: {e}", exc_info=True)
         raise HTTPException(status_code=500, detail=f"An unexpected error occurred while deleting user: {e}")
+
+
+# --- Lógica de Seguridad Refactorizada ---
+async def get_current_user(request: Request) -> User:
+    auth_header = request.headers.get('Authorization')
+    if not auth_header:
+        raise HTTPException(status_code=401, detail="Authorization header missing")
+    token = auth_header.split(' ')[1] if ' ' in auth_header else auth_header
+
+    try:
+        user_response = supabase.auth.get_user(token)
+        user = user_response.user
+        if not user:
+            raise HTTPException(status_code=401, detail="Invalid or expired token")
+        return user
+    except AuthApiError as e:
+        logger.error(f"Supabase Auth Error verifying user token: {e}", exc_info=True)
+        raise HTTPException(status_code=401, detail=f"Authentication error: {e.message}")
+
+
+# Dependencia para verificar que el usuario es Admin
+async def get_current_admin_user(current_user: User = Depends(get_current_user)):
+    profile_response = supabase.from_('profiles').select('role').eq('id', current_user.id).single().execute()
+    if profile_response.data is None or profile_response.data['role'] != 'admin':
+        raise HTTPException(status_code=403, detail="User is not an administrator")
+    logger.info(f"Admin endpoint accessed by admin user {current_user.id}")
+    return current_user 
+
+# --- Endpoint para Crear Payment Intent ---
+@app.post("/create-payment-intent")
+async def create_payment_intent(
+    request_body: CreatePaymentIntentRequest,
+    current_user: User = Depends(get_current_user) 
+):
+    logger.info(f"User {current_user.id} creating Payment Intent for booking {request_body.bookingId}")
+
+    try:
+        customer = await stripe.Customer.create(
+            metadata={'user_id': current_user.id}
+        )
+
+        ephemeral_key = await stripe.EphemeralKey.create(
+            customer=customer.id,
+            stripe_version='2024-04-10', 
+        )
+
+        payment_intent = await stripe.PaymentIntent.create(
+            amount=(request_body.amount * 100).toInt(), 
+            currency=request_body.currency,
+            customer=customer.id,
+            automatic_payment_methods={'enabled': True},
+            metadata={'booking_id': request_body.bookingId, 'user_id': current_user.id}
+        )
+
+        payment_insert_response = supabase.from_('payments').insert({
+            'booking_id': request_body.bookingId,
+            'user_id': current_user.id,
+            'amount': request_body.amount,
+            'currency': request_body.currency,
+            'status': 'pending',
+            'payment_gateway': 'stripe',
+            'gateway_payment_id': payment_intent.id, 
+        }).select('id').single().execute()
+
+        if payment_insert_response.error:
+            raise Exception(f"Failed to create pending payment record: {payment_insert_response.error.message}")
+
+        payment_id = payment_insert_response.data['id']
+
+        supabase.from_('bookings').update({'payment_id': payment_id}).eq('id', request_body.bookingId).execute()
+
+
+        return {
+            "paymentIntent": payment_intent.client_secret,
+            "ephemeralKey": ephemeral_key.secret,
+            "customer": customer.id,
+        }
+
+    except Exception as e:
+        logger.error(f"Error creating Payment Intent for booking {request_body.bookingId}: {e}", exc_info=True)
+        raise HTTPException(status_code=500, detail=str(e))
+
 

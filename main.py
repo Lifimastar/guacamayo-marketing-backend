@@ -413,25 +413,43 @@ async def create_payment_intent(
             metadata={'booking_id': request_body.bookingId, 'user_id': current_user.id}
         )
 
-        payment_insert_response = supabase.from_('payments').insert({
-            'booking_id': request_body.bookingId,
-            'user_id': current_user.id,
-            'amount': request_body.amount,
-            'currency': request_body.currency,
-            'status': 'pending',
-            'payment_gateway': 'stripe',
-            'gateway_payment_id': payment_intent.id, 
-        }).execute()
 
-        if not payment_insert_response.data:
-            error_message = f"Failed to create pending payment record: {payment_insert_response.error.message if payment_insert_response.error else 'Unknown error'}"
-            logger.error(error_message)
-            raise Exception(error_message)
-            
+        existing_payment_response = supabase.from_('payments').select('id').eq('booking_id', request_body.bookingId).maybe_single().execute()
+        existing_payment = existing_payment_response.data if existing_payment_response.data else None
 
-        payment_id = payment_insert_response.data[0]['id']
+        if existing_payment:
 
-        supabase.from_('bookings').update({'payment_id': payment_id}).eq('id', request_body.bookingId).execute()
+            logger.info(f"Found existing payment record for booking {request_body.bookingId}. Updating it.")
+            update_response = supabase.from_('payments').update({
+                'status': 'pending',
+                'gateway_payment_id': payment_intent.id,
+                'updated_at': 'now()'
+            }).eq('booking_id', request_body.bookingId).execute()
+
+            if not update_response.data:
+                raise Exception("Failed to update existing payment record.")
+        else:
+
+            logger.info(f"No existing payment record found for booking {request_body.bookingId}. Creating a new one.")
+            payment_insert_response = supabase.from_('payments').insert({
+                'booking_id': request_body.bookingId,
+                'user_id': current_user.id,
+                'amount': request_body.amount,
+                'currency': request_body.currency,
+                'status': 'pending',
+                'payment_gateway': 'stripe',
+                'gateway_payment_id': payment_intent.id, 
+            }).execute()
+
+            if not payment_insert_response.data:
+                error_message = f"Failed to create pending payment record: {payment_insert_response.error.message if payment_insert_response.error else 'Unknown database error'}"
+                logger.error(error_message)
+                raise Exception(error_message)
+
+
+            payment_id = payment_insert_response.data[0]['id']
+            supabase.from_('bookings').update({'payment_id': payment_id}).eq('id', request_body.bookingId).execute()
+
 
 
         return {

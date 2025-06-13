@@ -421,12 +421,15 @@ async def create_payment_intent(
             'status': 'pending',
             'payment_gateway': 'stripe',
             'gateway_payment_id': payment_intent.id, 
-        }).select('id').single().execute()
+        }).execute()
 
-        if payment_insert_response.data is None:
-            raise Exception(f"Failed to create pending payment record: {payment_insert_response.error.message if payment_insert_response.error else 'Unknown error'}")
+        if not payment_insert_response.data:
+            error_message = f"Failed to create pending payment record: {payment_insert_response.error.message if payment_insert_response.error else 'Unknown error'}"
+            logger.error(error_message)
+            raise Exception(error_message)
+            
 
-        payment_id = payment_insert_response.data['id']
+        payment_id = payment_insert_response.data[0]['id']
 
         supabase.from_('bookings').update({'payment_id': payment_id}).eq('id', request_body.bookingId).execute()
 

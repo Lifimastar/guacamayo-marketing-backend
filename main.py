@@ -32,6 +32,9 @@ if not supabase_url:
 if not supabase_key:
     raise ValueError("Error de configuración: La variable de entorno SUPABASE_SERVICE_ROLE_KEY no está definida o está vacía.")
 
+logger.info(f"Intentando inicializar Supabase con URL: {supabase_url}")
+logger.info(f"Clave leída para Supabase (primeros 10 caracteres): {supabase_key[:10]}...")
+
 try:
     supabase: Client = create_client(supabase_url, supabase_key)
     logger.info("Cliente de Supabase inicializado con éxito.")

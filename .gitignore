@@ -1,2 +1,22 @@
-# Ignorar archivo de variables de entorno local
+# Archivo de variables de entorno
 .env
+
+# Entornos virtuales de Python
+.venv/
+venv/
+env/
+.env/
+
+# Archivos de caché de Python
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+
+# Archivos de configuración de IDEs
+.vscode/
+.idea/
+
+# Archivos de sistema operativo
+.DS_Store
+Thumbs.db

@@ -1,3 +1,4 @@
+# Importaciones
 from fastapi import FastAPI, Request, HTTPException, Depends
 from fastapi.responses import JSONResponse
 import stripe
@@ -11,7 +12,11 @@ from typing import Dict, Any
 from pydantic import BaseModel
 from gotrue.errors import AuthApiError
 from gotrue.types import User
+import firebase_admin
+from firebase_admin import credentials, messaging
+import json
 
+# configuraciones
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
@@ -33,6 +38,21 @@ class CreatePaymentIntentRequest(BaseModel):
     amount: float 
     currency: str 
 
+try:
+    firebase_service_account_json_str = os.getenv('FIREBASE_SERVICE_ACCOUNT_JSON')
+    if firebase_service_account_json_str is None:
+        raise ValueError("La variable de entorno FIREBASE_SERVICE_ACCOUNT_JSON no esta configurada.")
+    
+    firebase_service_account_dict = json.loads(firebase_service_account_json_str)
+
+    cred = credentials.Certificate(firebase_service_account_dict)
+    firebase_admin.initialize_app(cred)
+    logger.info("Firebase Admin SDK inicializado con exito.")
+
+except Exception as e:
+    logger.error(f"Error al inicializar Firebase Admin SDK: {e}", exc_info=True)
+
+# Run
 app = FastAPI()
 
 @app.get("/")

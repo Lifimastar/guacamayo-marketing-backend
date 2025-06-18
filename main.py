@@ -27,11 +27,17 @@ webhook_secret = os.getenv('STRIPE_WEBHOOK_SIGNING_SECRET')
 
 supabase_url = os.getenv('SUPABASE_URL')
 supabase_key = os.getenv('SUPABASE_SERVICE_ROLE_KEY')
-if not supabase_url or not supabase_key:
-    logger.error("Supabase URL or Service Role Key not configured!")
-    raise Exception("Backend configuration error: Supabase keys missing")
+if not supabase_url:
+    raise ValueError("Error de configuración: La variable de entorno SUPABASE_URL no está definida.")
+if not supabase_key:
+    raise ValueError("Error de configuración: La variable de entorno SUPABASE_SERVICE_ROLE_KEY no está definida o está vacía.")
 
-supabase: Client = create_client(supabase_url, supabase_key)
+try:
+    supabase: Client = create_client(supabase_url, supabase_key)
+    logger.info("Cliente de Supabase inicializado con éxito.")
+except Exception as e:
+    logger.error(f"Error al inicializar el cliente de Supabase incluso con las claves presentes: {e}", exc_info=True)
+    raise e
 
 class CreatePaymentIntentRequest(BaseModel):
     bookingId: str

@@ -26,22 +26,24 @@ stripe.api_key = os.getenv('STRIPE_SECRET_KEY')
 webhook_secret = os.getenv('STRIPE_WEBHOOK_SIGNING_SECRET')
 
 supabase_url = os.getenv('SUPABASE_URL')
+supabase_anon_key = os.getenv('SUPABASE_ANON_KEY') 
 supabase_service_key = os.getenv('SUPABASE_SERVICE_ROLE_KEY') 
 
 if not supabase_url:
     raise ValueError("Error de configuración: La variable de entorno SUPABASE_URL no está definida.")
+if not supabase_anon_key:
+    raise ValueError("Error de configuración: La variable de entorno SUPABASE_ANON_KEY no está definida.")
 if not supabase_service_key:
-    raise ValueError("Error de configuración: La variable de entorno SUPABASE_SERVICE_ROLE_KEY no está definida o está vacía.")
+    raise ValueError("Error de configuración: La variable de entorno SUPABASE_SERVICE_ROLE_KEY no está definida.")
 
 try:
     options = ClientOptions(
         headers={
-            "apikey": supabase_service_key,
             "Authorization": f"Bearer {supabase_service_key}",
         }
     )
-    supabase: Client = create_client(supabase_url, supabase_key=None, options=options)
-    logger.info("Cliente de Supabase inicializado con éxito usando la nueva API Key.")
+    supabase: Client = create_client(supabase_url, supabase_anon_key, options=options)
+    logger.info("Cliente de Supabase inicializado con éxito en modo de servicio.")
 
 except Exception as e:
     logger.error(f"Error al inicializar el cliente de Supabase: {e}", exc_info=True)

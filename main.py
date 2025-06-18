@@ -4,7 +4,7 @@ from fastapi.responses import JSONResponse
 import stripe
 import os
 from dotenv import load_dotenv
-from supabase import create_client, Client
+from supabase import ClientOptions, create_client, Client
 import logging 
 from postgrest.exceptions import APIError
 from postgrest import APIResponse as PostgrestAPIResponse
@@ -26,20 +26,25 @@ stripe.api_key = os.getenv('STRIPE_SECRET_KEY')
 webhook_secret = os.getenv('STRIPE_WEBHOOK_SIGNING_SECRET')
 
 supabase_url = os.getenv('SUPABASE_URL')
-supabase_key = os.getenv('SUPABASE_SERVICE_ROLE_KEY')
+supabase_service_key = os.getenv('SUPABASE_SERVICE_ROLE_KEY') 
+
 if not supabase_url:
     raise ValueError("Error de configuración: La variable de entorno SUPABASE_URL no está definida.")
-if not supabase_key:
+if not supabase_service_key:
     raise ValueError("Error de configuración: La variable de entorno SUPABASE_SERVICE_ROLE_KEY no está definida o está vacía.")
 
-logger.info(f"Intentando inicializar Supabase con URL: {supabase_url}")
-logger.info(f"Clave leída para Supabase (primeros 10 caracteres): {supabase_key[:10]}...")
-
 try:
-    supabase: Client = create_client(supabase_url, supabase_key)
-    logger.info("Cliente de Supabase inicializado con éxito.")
+    options = ClientOptions(
+        headers={
+            "apikey": supabase_service_key,
+            "Authorization": f"Bearer {supabase_service_key}",
+        }
+    )
+    supabase: Client = create_client(supabase_url, supabase_key=None, options=options)
+    logger.info("Cliente de Supabase inicializado con éxito usando la nueva API Key.")
+
 except Exception as e:
-    logger.error(f"Error al inicializar el cliente de Supabase incluso con las claves presentes: {e}", exc_info=True)
+    logger.error(f"Error al inicializar el cliente de Supabase: {e}", exc_info=True)
     raise e
 
 class CreatePaymentIntentRequest(BaseModel):

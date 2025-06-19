@@ -355,7 +355,6 @@ async def stripe_webhook(request: Request):
     return JSONResponse(content={"received": True, "event_type": event_type, "processed": processed}, status_code=200)
 
 # --- Lógica de Seguridad: Dependencia para verificar si el usuario que llama es Admin ---
-
 async def get_current_admin_user(request: Request) -> User:
     auth_header = request.headers.get('Authorization')
     if not auth_header:
@@ -368,7 +367,7 @@ async def get_current_admin_user(request: Request) -> User:
         user = user_response.user
 
         if not user:
-            logger.warning(f"Admin endpoint called with invalid/expired token: {token}")
+            logger.warning(f"Admin endpoint called with invalid/expired token.")
             raise HTTPException(status_code=401, detail="Invalid or expired token")
 
         profile_response = supabase.from_('profiles').select('role').eq('id', user.id).single().execute()
@@ -377,13 +376,16 @@ async def get_current_admin_user(request: Request) -> User:
             logger.warning(f"Admin endpoint called by user {user.id} with no profile found.")
             raise HTTPException(status_code=403, detail="User profile not found")
 
-        if profile_response.data['role'] != 'admin':
-            logger.warning(f"Admin endpoint called by non-admin user {user.id} with role {profile_response.data['role']}")
+        if profile_response.data.get('role') != 'admin':
+            logger.warning(f"Admin endpoint called by non-admin user {user.id} with role {profile_response.data.get('role')}")
             raise HTTPException(status_code=403, detail="User is not an administrator")
 
         logger.info(f"Admin endpoint accessed by admin user {user.id}")
         return user
 
+    except AuthApiError as e:
+        logger.error(f'Supabase Auth Error verifyng admin role for token: {e}', exc_info=True)
+        return HTTPException(status_code=401, detail=f"Authentication error: {e.message}")
     except APIError as e:
         logger.error(f"Supabase API Error verifying admin role for token: {e}", exc_info=True)
         raise HTTPException(status_code=500, detail=f"Database error verifying admin role: {e.message}")
@@ -423,7 +425,6 @@ async def delete_user_by_admin(user_id: str, current_admin_user: User = Depends(
         logger.error(f"Unexpected Error deleting user {user_id}: {e}", exc_info=True)
         raise HTTPException(status_code=500, detail=f"An unexpected error occurred while deleting user: {e}")
 
-
 # --- Lógica de Seguridad Refactorizada ---
 async def get_current_user(request: Request) -> User:
     auth_header = request.headers.get('Authorization')
@@ -440,15 +441,6 @@ async def get_current_user(request: Request) -> User:
     except AuthApiError as e:
         logger.error(f"Supabase Auth Error verifying user token: {e}", exc_info=True)
         raise HTTPException(status_code=401, detail=f"Authentication error: {e.message}")
-
-
-# Dependencia para verificar que el usuario es Admin
-async def get_current_admin_user(current_user: User = Depends(get_current_user)):
-    profile_response = supabase.from_('profiles').select('role').eq('id', current_user.id).single().execute()
-    if profile_response.data is None or profile_response.data['role'] != 'admin':
-        raise HTTPException(status_code=403, detail="User is not an administrator")
-    logger.info(f"Admin endpoint accessed by admin user {current_user.id}")
-    return current_user 
 
 # --- Endpoint para Crear Payment Intent ---
 @app.post("/create-payment-intent")

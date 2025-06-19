@@ -1,6 +1,7 @@
 # Importaciones
 from fastapi import FastAPI, Request, HTTPException, Depends
 from fastapi.responses import JSONResponse
+import firebase_admin.exceptions
 import stripe
 import os
 from dotenv import load_dotenv
@@ -54,6 +55,11 @@ class CreatePaymentIntentRequest(BaseModel):
     bookingId: str
     amount: float 
     currency: str 
+
+class NotificationRequest(BaseModel):
+    user_id: str
+    title: str
+    body: str
 
 try:
     firebase_service_account_json_str = os.getenv('FIREBASE_SERVICE_ACCOUNT_JSON')
@@ -269,6 +275,26 @@ async def _handle_payment_intent_failed(payment_intent: dict):
 
     logger.info(f"Successfully processed payment_intent.payment_failed for booking {booking_id}. Booking status updated to 'payment_failed'.")
     return True 
+
+# Funcion auxiliar para enviar la notificacion
+async def _send_fcm_notification(token: str, title: str, body: str):
+    try:
+        message = messaging.Message(
+            notification=messaging.Notification(
+                title=title,
+                body=body,
+            ),
+            token=token,
+        )
+        response = messaging.send(message)
+        logger.info(f'Notificacion enviada con exito a token {token[:10]}...: {response}')
+        return True
+    except firebase_admin.exceptions.UnregisteredError:
+        logger.warning(f"El token FCM {token[:10]}... ya no esta registrado. Deberia ser eliminado de la DB.")
+        return False
+    except Exception as e:
+        logger.error(f"Error al enviar notificacion a token {token:[:10]}...: {e}", exc_info=True)
+        return False
 
 # --- Endpoint Principal del Webhook ---
 
@@ -499,4 +525,35 @@ async def create_payment_intent(
         logger.error(f"Error creating Payment Intent for booking {request_body.bookingId}: {e}", exc_info=True)
         raise HTTPException(status_code=500, detail=str(e))
 
+# --- Endpoint para que el admin pueda enviar notificaciones
+@app.post("/admin/notify-user")
+async def notify_user(
+    request_body: NotificationRequest,
+    current_admin_user: User = Depends(get_current_admin_user)
+):
+    logger.info(f"Admin {current_admin_user.id} intentando notificar al usuario {request_body.user_id}")
+
+    try:
+        profile_response = supabase.from_('profiles').select('fcm_token').eq('id', request_body.user_id).single().execute()
+
+        if not profile_response.data or profile_response.data.get('fcm_token') is None:
+            logger.warning(f"No se encontro fcm_token para el usuario {request_body.user_id}. No se puede enviar notificacion.")
+            return JSONResponse(content={"sent": False, "reason": "FCM token not found"}, status_code=404)
+        
+        fcm_token = profile_response.data['fcm_token']
+
+        success = await _send_fcm_notification(
+            token=fcm_token,
+            title=request_body.title,
+            body=request_body.body
+        )
+
+        if success:
+            return JSONResponse(content={'sent': True}, status_code=200)
+        else:
+            raise HTTPException(status_code=500, detail="Failed to send notificacion via FCM")
+        
+    except Exception as e:
+        logger.error(f'Error en el endpoint /admin/notify-user: {e}', exc_info=True)
+        raise HTTPException(status_code=500, detail=str(e))
 

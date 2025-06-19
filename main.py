@@ -5,7 +5,7 @@ import firebase_admin.exceptions
 import stripe
 import os
 from dotenv import load_dotenv
-from supabase import ClientOptions, create_client, Client
+from supabase import create_client, Client, ClientOptions
 import logging 
 from postgrest.exceptions import APIError
 from postgrest import APIResponse as PostgrestAPIResponse
@@ -23,32 +23,35 @@ logger = logging.getLogger(__name__)
 
 load_dotenv()
 
+# Configuración de Stripe
 stripe.api_key = os.getenv('STRIPE_SECRET_KEY')
 webhook_secret = os.getenv('STRIPE_WEBHOOK_SIGNING_SECRET')
 
+# Configuración de Supabase
 supabase_url = os.getenv('SUPABASE_URL')
-supabase_legacy_anon_key = os.getenv('SUPABASE_LEGACY_ANON_KEY')
+supabase_anon_key = os.getenv('SUPABASE_LEGACY_ANON_KEY')
 supabase_service_key = os.getenv('SUPABASE_SERVICE_ROLE_KEY')
 
-if not supabase_url:
-    raise ValueError("Error de configuración: La variable de entorno SUPABASE_URL no está definida.")
-if not supabase_legacy_anon_key:
-    raise ValueError("Error de configuración: La variable de entorno SUPABASE_LEGACY_ANON_KEY no está definida.")
-if not supabase_service_key:
-    raise ValueError("Error de configuración: La variable de entorno SUPABASE_SERVICE_ROLE_KEY no está definida.")
+if not supabase_url or not supabase_anon_key or not supabase_service_key:
+    raise ValueError('Una o mas variables de entorno de Supabase no estan definidas.')
 
+# Cliente principal (para autenticación de usuarios)
+supabase: Client = create_client(supabase_url, supabase_anon_key)
+logger.info("Cliente principal de Supabase inicializado con éxito.")
+
+# Cliente de Administrador (para operaciones con privilegios de servicio)
 try:
-    options = ClientOptions(
+    admin_options = ClientOptions(
         headers={
             "apikey": supabase_service_key,
             "Authorization": f"Bearer {supabase_service_key}",
         }
     )
-    supabase: Client = create_client(supabase_url, supabase_legacy_anon_key, options=options)
-    logger.info("Cliente de Supabase inicializado con éxito en modo de servicio usando la nueva API Key en los headers.")
-
+    # Usamos la clave anónima solo para pasar la validación del constructor
+    supabase_admin: Client = create_client(supabase_url, supabase_anon_key, options=admin_options)
+    logger.info("Cliente de Administrador de Supabase inicializado con éxito.")
 except Exception as e:
-    logger.error(f"Error al inicializar el cliente de Supabase: {e}", exc_info=True)
+    logger.error(f"Error al inicializar el cliente de administrador de Supabase: {e}", exc_info=True)
     raise e
 
 class CreatePaymentIntentRequest(BaseModel):
@@ -61,6 +64,7 @@ class NotificationRequest(BaseModel):
     title: str
     body: str
 
+# inicialización de Firebase
 try:
     firebase_service_account_json_str = os.getenv('FIREBASE_SERVICE_ACCOUNT_JSON')
     if firebase_service_account_json_str is None:
@@ -358,40 +362,27 @@ async def stripe_webhook(request: Request):
 async def get_current_admin_user(request: Request) -> User:
     auth_header = request.headers.get('Authorization')
     if not auth_header:
-        logger.warning("Admin endpoint called without Authorization header")
         raise HTTPException(status_code=401, detail="Authorization header missing")
+    
     token = auth_header.split(' ')[1] if ' ' in auth_header else auth_header
 
     try:
         user_response = supabase.auth.get_user(token)
         user = user_response.user
-
         if not user:
-            logger.warning(f"Admin endpoint called with invalid/expired token.")
             raise HTTPException(status_code=401, detail="Invalid or expired token")
 
-        profile_response = supabase.from_('profiles').select('role').eq('id', user.id).single().execute()
+        profile_response = supabase_admin.from_('profiles').select('role').eq('id', user.id).single().execute()
 
-        if profile_response.data is None:
-            logger.warning(f"Admin endpoint called by user {user.id} with no profile found.")
-            raise HTTPException(status_code=403, detail="User profile not found")
-
-        if profile_response.data.get('role') != 'admin':
-            logger.warning(f"Admin endpoint called by non-admin user {user.id} with role {profile_response.data.get('role')}")
+        if not profile_response.data or profile_response.data.get('role') != 'admin':
             raise HTTPException(status_code=403, detail="User is not an administrator")
 
         logger.info(f"Admin endpoint accessed by admin user {user.id}")
         return user
 
-    except AuthApiError as e:
-        logger.error(f'Supabase Auth Error verifyng admin role for token: {e}', exc_info=True)
-        return HTTPException(status_code=401, detail=f"Authentication error: {e.message}")
-    except APIError as e:
-        logger.error(f"Supabase API Error verifying admin role for token: {e}", exc_info=True)
-        raise HTTPException(status_code=500, detail=f"Database error verifying admin role: {e.message}")
     except Exception as e:
-        logger.error(f"Unexpected Error verifying admin role for token: {e}", exc_info=True)
-        raise HTTPException(status_code=500, detail=f"Unexpected error verifying admin role: {e}")
+        logger.error(f"Error en la dependencia de admin: {e}", exc_info=True)
+        raise HTTPException(status_code=500, detail="Error verifying admin credentials")
 
 # --- Endpoint para Eliminar Usuario (Solo Admin) ---
 @app.delete("/admin/users/{user_id}") 

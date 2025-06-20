@@ -65,14 +65,22 @@ async def get_current_admin_user(request: Request) -> User:
         user = user_response.user
         if not user:
             raise HTTPException(status_code=401, detail="Invalid or expired token")
+        
+        profile_response = supabase.from_('profiles').select('role').eq('id', user.id).single().execute()
 
-        if user.user_metadata.get('role') != 'admin':
+        if not profile_response.data or profile_response.data.get('role') != 'admin':
             raise HTTPException(status_code=403, detail="User is not an administrator")
 
         logger.info(f"Admin endpoint accessed by admin user {user.id}")
         return user
+    except AuthApiError as e:
+        logger.error(f"AuthApiError en dependencia de admin: {e}", exc_info=True)
+        raise HTTPException(status_code=401, detail=f"Authentication error: {e.message}")
+    except APIError as e:
+        logger.error(f"APIError en dependencia de admin: {e}", exc_info=True)
+        raise HTTPException(status_code=500, detail=f"Database query error: {e.message}")
     except Exception as e:
-        logger.error(f"Error en la dependencia de admin: {e}", exc_info=True)
+        logger.error(f"Error inesperado en dependencia de admin: {e}", exc_info=True)
         raise HTTPException(status_code=500, detail="Error verifying admin credentials")
 
 async def _handle_payment_intent_succeeded(payment_intent: dict):

@@ -17,7 +17,6 @@ import firebase_admin
 from firebase_admin import credentials, messaging
 import json
 
-# configuraciones
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
@@ -29,62 +28,52 @@ webhook_secret = os.getenv('STRIPE_WEBHOOK_SIGNING_SECRET')
 
 # Configuración de Supabase
 supabase_url = os.getenv('SUPABASE_URL')
-supabase_anon_key = os.getenv('SUPABASE_LEGACY_ANON_KEY')
-supabase_service_key = os.getenv('SUPABASE_SERVICE_ROLE_KEY')
+supabase_key = os.getenv('SUPABASE_SERVICE_ROLE_KEY')
 
-if not supabase_url or not supabase_anon_key or not supabase_service_key:
-    raise ValueError('Una o mas variables de entorno de Supabase no estan definidas.')
+if not supabase_url or not supabase_key:
+    raise ValueError("Las variables de entorno de Supabase no están configuradas correctamente.")
 
 # Cliente principal (para autenticación de usuarios)
-supabase: Client = create_client(supabase_url, supabase_anon_key)
-logger.info("Cliente principal de Supabase inicializado con éxito.")
-
-# Cliente de Administrador (para operaciones con privilegios de servicio)
-try:
-    admin_options = ClientOptions(
-        headers={
-            "apikey": supabase_service_key,
-            "Authorization": f"Bearer {supabase_service_key}",
-        }
-    )
-    # Usamos la clave anónima solo para pasar la validación del constructor
-    supabase_admin: Client = create_client(supabase_url, supabase_anon_key, options=admin_options)
-    logger.info("Cliente de Administrador de Supabase inicializado con éxito.")
-except Exception as e:
-    logger.error(f"Error al inicializar el cliente de administrador de Supabase: {e}", exc_info=True)
-    raise e
-
-class CreatePaymentIntentRequest(BaseModel):
-    bookingId: str
-    amount: float 
-    currency: str 
-
-class NotificationRequest(BaseModel):
-    user_id: str
-    title: str
-    body: str
+supabase: Client = create_client(supabase_url, supabase_key)
+logger.info("Cliente de Supabase inicializado con éxito en modo de servicio.")
 
 # inicialización de Firebase
 try:
     firebase_service_account_json_str = os.getenv('FIREBASE_SERVICE_ACCOUNT_JSON')
-    if firebase_service_account_json_str is None:
-        raise ValueError("La variable de entorno FIREBASE_SERVICE_ACCOUNT_JSON no esta configurada.")
-    
-    firebase_service_account_dict = json.loads(firebase_service_account_json_str)
-
-    cred = credentials.Certificate(firebase_service_account_dict)
-    firebase_admin.initialize_app(cred)
-    logger.info("Firebase Admin SDK inicializado con exito.")
-
+    if firebase_service_account_json_str:
+        firebase_service_account_dict = json.loads(firebase_service_account_json_str)
+        cred = credentials.Certificate(firebase_service_account_dict)
+        firebase_admin.initialize_app(cred)
+        logger.info("Firebase Admin SDK inicializado con éxito.")
+    else:
+        logger.warning("Variable de entorno de Firebase no encontrada. Las notificaciones no funcionarán.")
 except Exception as e:
     logger.error(f"Error al inicializar Firebase Admin SDK: {e}", exc_info=True)
 
-# Run
 app = FastAPI()
 
-@app.get("/")
-async def read_root():
-    return {"message": "Backend is running"}
+# --- DEPENDENCIA DE SEGURIDAD ---
+async def get_current_admin_user(request: Request) -> User:
+    auth_header = request.headers.get('Authorization')
+    if not auth_header:
+        raise HTTPException(status_code=401, detail="Authorization header missing")
+    
+    token = auth_header.split(' ')[1] if ' ' in auth_header else auth_header
+
+    try:
+        user_response = supabase.auth.get_user(token)
+        user = user_response.user
+        if not user:
+            raise HTTPException(status_code=401, detail="Invalid or expired token")
+
+        if user.user_metadata.get('role') != 'admin':
+            raise HTTPException(status_code=403, detail="User is not an administrator")
+
+        logger.info(f"Admin endpoint accessed by admin user {user.id}")
+        return user
+    except Exception as e:
+        logger.error(f"Error en la dependencia de admin: {e}", exc_info=True)
+        raise HTTPException(status_code=500, detail="Error verifying admin credentials")
 
 async def _handle_payment_intent_succeeded(payment_intent: dict):
     """Maneja el evento payment_intent.succeeded."""
@@ -193,7 +182,6 @@ async def _handle_payment_intent_succeeded(payment_intent: dict):
     logger.info(f"Successfully processed payment_intent.succeeded for booking {booking_id}. Booking status updated to 'confirmed'.")
     return True 
 
-
 async def _handle_payment_intent_failed(payment_intent: dict):
     """Maneja el evento payment_intent.payment_failed."""
     booking_id = payment_intent['metadata'].get('booking_id')
@@ -300,8 +288,38 @@ async def _send_fcm_notification(token: str, title: str, body: str):
         logger.error(f"Error al enviar notificacion a token {token:[:10]}...: {e}", exc_info=True)
         return False
 
-# --- Endpoint Principal del Webhook ---
+# --- Lógica de Seguridad Refactorizada ---
+async def get_current_user(request: Request) -> User:
+    auth_header = request.headers.get('Authorization')
+    if not auth_header:
+        raise HTTPException(status_code=401, detail="Authorization header missing")
+    token = auth_header.split(' ')[1] if ' ' in auth_header else auth_header
 
+    try:
+        user_response = supabase.auth.get_user(token)
+        user = user_response.user
+        if not user:
+            raise HTTPException(status_code=401, detail="Invalid or expired token")
+        return user
+    except AuthApiError as e:
+        logger.error(f"Supabase Auth Error verifying user token: {e}", exc_info=True)
+        raise HTTPException(status_code=401, detail=f"Authentication error: {e.message}")
+
+class CreatePaymentIntentRequest(BaseModel):
+    bookingId: str
+    amount: float 
+    currency: str 
+
+class NotificationRequest(BaseModel):
+    user_id: str
+    title: str
+    body: str
+
+@app.get("/")
+async def read_root():
+    return {"message": "Backend is running"}
+
+# --- Endpoint Principal del Webhook ---
 @app.post("/stripe-webhook")
 async def stripe_webhook(request: Request):
     payload = await request.body()
@@ -358,32 +376,6 @@ async def stripe_webhook(request: Request):
 
     return JSONResponse(content={"received": True, "event_type": event_type, "processed": processed}, status_code=200)
 
-# --- Lógica de Seguridad: Dependencia para verificar si el usuario que llama es Admin ---
-async def get_current_admin_user(request: Request) -> User:
-    auth_header = request.headers.get('Authorization')
-    if not auth_header:
-        raise HTTPException(status_code=401, detail="Authorization header missing")
-    
-    token = auth_header.split(' ')[1] if ' ' in auth_header else auth_header
-
-    try:
-        user_response = supabase.auth.get_user(token)
-        user = user_response.user
-        if not user:
-            raise HTTPException(status_code=401, detail="Invalid or expired token")
-
-        profile_response = supabase_admin.from_('profiles').select('role').eq('id', user.id).single().execute()
-
-        if not profile_response.data or profile_response.data.get('role') != 'admin':
-            raise HTTPException(status_code=403, detail="User is not an administrator")
-
-        logger.info(f"Admin endpoint accessed by admin user {user.id}")
-        return user
-
-    except Exception as e:
-        logger.error(f"Error en la dependencia de admin: {e}", exc_info=True)
-        raise HTTPException(status_code=500, detail="Error verifying admin credentials")
-
 # --- Endpoint para Eliminar Usuario (Solo Admin) ---
 @app.delete("/admin/users/{user_id}") 
 async def delete_user_by_admin(user_id: str, current_admin_user: User = Depends(get_current_admin_user)):
@@ -415,23 +407,6 @@ async def delete_user_by_admin(user_id: str, current_admin_user: User = Depends(
     except Exception as e:
         logger.error(f"Unexpected Error deleting user {user_id}: {e}", exc_info=True)
         raise HTTPException(status_code=500, detail=f"An unexpected error occurred while deleting user: {e}")
-
-# --- Lógica de Seguridad Refactorizada ---
-async def get_current_user(request: Request) -> User:
-    auth_header = request.headers.get('Authorization')
-    if not auth_header:
-        raise HTTPException(status_code=401, detail="Authorization header missing")
-    token = auth_header.split(' ')[1] if ' ' in auth_header else auth_header
-
-    try:
-        user_response = supabase.auth.get_user(token)
-        user = user_response.user
-        if not user:
-            raise HTTPException(status_code=401, detail="Invalid or expired token")
-        return user
-    except AuthApiError as e:
-        logger.error(f"Supabase Auth Error verifying user token: {e}", exc_info=True)
-        raise HTTPException(status_code=401, detail=f"Authentication error: {e.message}")
 
 # --- Endpoint para Crear Payment Intent ---
 @app.post("/create-payment-intent")

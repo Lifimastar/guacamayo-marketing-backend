@@ -277,13 +277,17 @@ async def _handle_payment_intent_failed(payment_intent: dict):
     return True 
 
 # Funcion auxiliar para enviar la notificacion
-async def _send_fcm_notification(token: str, title: str, body: str):
+async def _send_fcm_notification(token: str, title: str, body: str, booking_id: str):
     try:
         message = messaging.Message(
             notification=messaging.Notification(
                 title=title,
                 body=body,
             ),
+            data={
+                'click_action': 'FLUTTER_NOTIFICATION_CLICK', 
+                'booking_id': booking_id,
+            },
             token=token,
         )
         response = messaging.send(message)
@@ -322,6 +326,7 @@ class NotificationRequest(BaseModel):
     user_id: str
     title: str
     body: str
+    booking_id: str
 
 @app.get("/")
 async def read_root():
@@ -511,7 +516,8 @@ async def notify_user(
         success = await _send_fcm_notification(
             token=fcm_token,
             title=request_body.title,
-            body=request_body.body
+            body=request_body.body,
+            booking_id=request_body.booking_id,
         )
 
         if success:

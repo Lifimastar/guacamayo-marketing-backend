@@ -1,4 +1,5 @@
-from fastapi import APIRouter, Request, HTTPException, Depends, JSONResponse
+from fastapi import APIRouter, Request, HTTPException, Depends
+from fastapi.responses import JSONResponse
 from gotrue.types import User
 from gotrue.errors import AuthApiError
 from stripe import APIError

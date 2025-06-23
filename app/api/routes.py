@@ -1,88 +1,20 @@
-# Importaciones
-from fastapi import FastAPI, Request, HTTPException, Depends
-from fastapi.responses import JSONResponse
-import firebase_admin.exceptions
-import stripe
-import os
-from dotenv import load_dotenv
-from supabase import create_client, Client, ClientOptions
-import logging 
-from postgrest.exceptions import APIError
-from postgrest import APIResponse as PostgrestAPIResponse
-from typing import Dict, Any
-from pydantic import BaseModel
-from gotrue.errors import AuthApiError
+from fastapi import APIRouter, Request, HTTPException, Depends, JSONResponse
 from gotrue.types import User
+from gotrue.errors import AuthApiError
+from stripe import APIError
+from firebase_admin import messaging
+from supabase import PostgrestAPIResponse
 import firebase_admin
-from firebase_admin import credentials, messaging
-import json
+import stripe
 
-logging.basicConfig(level=logging.INFO)
-logger = logging.getLogger(__name__)
 
-load_dotenv()
+from app.config import supabase, logger, webhook_secret
+from app.models import CreatePaymentIntentRequest, NotificationRequest
+from app.api.deps import get_current_user, get_current_admin_user
 
-# Configuración de Stripe
-stripe.api_key = os.getenv('STRIPE_SECRET_KEY')
-webhook_secret = os.getenv('STRIPE_WEBHOOK_SIGNING_SECRET')
+router = APIRouter()
 
-# Configuración de Supabase
-supabase_url = os.getenv('SUPABASE_URL')
-supabase_key = os.getenv('SUPABASE_SERVICE_ROLE_KEY')
-
-if not supabase_url or not supabase_key:
-    raise ValueError("Las variables de entorno de Supabase no están configuradas correctamente.")
-
-# Cliente principal (para autenticación de usuarios)
-supabase: Client = create_client(supabase_url, supabase_key)
-logger.info("Cliente de Supabase inicializado con éxito en modo de servicio.")
-
-# inicialización de Firebase
-try:
-    firebase_service_account_json_str = os.getenv('FIREBASE_SERVICE_ACCOUNT_JSON')
-    if firebase_service_account_json_str:
-        firebase_service_account_dict = json.loads(firebase_service_account_json_str)
-        cred = credentials.Certificate(firebase_service_account_dict)
-        firebase_admin.initialize_app(cred)
-        logger.info("Firebase Admin SDK inicializado con éxito.")
-    else:
-        logger.warning("Variable de entorno de Firebase no encontrada. Las notificaciones no funcionarán.")
-except Exception as e:
-    logger.error(f"Error al inicializar Firebase Admin SDK: {e}", exc_info=True)
-
-app = FastAPI()
-
-# --- DEPENDENCIA DE SEGURIDAD ---
-async def get_current_admin_user(request: Request) -> User:
-    auth_header = request.headers.get('Authorization')
-    if not auth_header:
-        raise HTTPException(status_code=401, detail="Authorization header missing")
-    
-    token = auth_header.split(' ')[1] if ' ' in auth_header else auth_header
-
-    try:
-        user_response = supabase.auth.get_user(token)
-        user = user_response.user
-        if not user:
-            raise HTTPException(status_code=401, detail="Invalid or expired token")
-        
-        profile_response = supabase.from_('profiles').select('role').eq('id', user.id).single().execute()
-
-        if not profile_response.data or profile_response.data.get('role') != 'admin':
-            raise HTTPException(status_code=403, detail="User is not an administrator")
-
-        logger.info(f"Admin endpoint accessed by admin user {user.id}")
-        return user
-    except AuthApiError as e:
-        logger.error(f"AuthApiError en dependencia de admin: {e}", exc_info=True)
-        raise HTTPException(status_code=401, detail=f"Authentication error: {e.message}")
-    except APIError as e:
-        logger.error(f"APIError en dependencia de admin: {e}", exc_info=True)
-        raise HTTPException(status_code=500, detail=f"Database query error: {e.message}")
-    except Exception as e:
-        logger.error(f"Error inesperado en dependencia de admin: {e}", exc_info=True)
-        raise HTTPException(status_code=500, detail="Error verifying admin credentials")
-
+# --- LÓGICA DE WEBHOOKS DE STRIPE ---
 async def _handle_payment_intent_succeeded(payment_intent: dict):
     """Maneja el evento payment_intent.succeeded."""
     booking_id = payment_intent['metadata'].get('booking_id')
@@ -276,64 +208,7 @@ async def _handle_payment_intent_failed(payment_intent: dict):
     logger.info(f"Successfully processed payment_intent.payment_failed for booking {booking_id}. Booking status updated to 'payment_failed'.")
     return True 
 
-# Funcion auxiliar para enviar la notificacion
-async def _send_fcm_notification(token: str, title: str, body: str, booking_id: str):
-    try:
-        message = messaging.Message(
-            notification=messaging.Notification(
-                title=title,
-                body=body,
-            ),
-            data={
-                'click_action': 'FLUTTER_NOTIFICATION_CLICK', 
-                'booking_id': booking_id,
-            },
-            token=token,
-        )
-        response = messaging.send(message)
-        logger.info(f'Notificacion enviada con exito a token {token[:10]}...: {response}')
-        return True
-    except firebase_admin.exceptions.UnregisteredError:
-        logger.warning(f"El token FCM {token[:10]}... ya no esta registrado. Deberia ser eliminado de la DB.")
-        return False
-    except Exception as e:
-        logger.error(f"Error al enviar notificacion a token {token:[:10]}...: {e}", exc_info=True)
-        return False
-
-# --- Lógica de Seguridad Refactorizada ---
-async def get_current_user(request: Request) -> User:
-    auth_header = request.headers.get('Authorization')
-    if not auth_header:
-        raise HTTPException(status_code=401, detail="Authorization header missing")
-    token = auth_header.split(' ')[1] if ' ' in auth_header else auth_header
-
-    try:
-        user_response = supabase.auth.get_user(token)
-        user = user_response.user
-        if not user:
-            raise HTTPException(status_code=401, detail="Invalid or expired token")
-        return user
-    except AuthApiError as e:
-        logger.error(f"Supabase Auth Error verifying user token: {e}", exc_info=True)
-        raise HTTPException(status_code=401, detail=f"Authentication error: {e.message}")
-
-class CreatePaymentIntentRequest(BaseModel):
-    bookingId: str
-    amount: float 
-    currency: str 
-
-class NotificationRequest(BaseModel):
-    user_id: str
-    title: str
-    body: str
-    booking_id: str
-
-@app.get("/")
-async def read_root():
-    return {"message": "Backend is running"}
-
-# --- Endpoint Principal del Webhook ---
-@app.post("/stripe-webhook")
+@router.post("/stripe-webhook")
 async def stripe_webhook(request: Request):
     payload = await request.body()
     sig_header = request.headers.get('Stripe-Signature')
@@ -389,8 +264,64 @@ async def stripe_webhook(request: Request):
 
     return JSONResponse(content={"received": True, "event_type": event_type, "processed": processed}, status_code=200)
 
-# --- Endpoint para Eliminar Usuario (Solo Admin) ---
-@app.delete("/admin/users/{user_id}") 
+# --- LÓGICA DE NOTIFICACIONES ---
+async def _send_fcm_notification(token: str, title: str, body: str, booking_id: str):
+    try:
+        message = messaging.Message(
+            notification=messaging.Notification(
+                title=title,
+                body=body,
+            ),
+            data={
+                'click_action': 'FLUTTER_NOTIFICATION_CLICK', 
+                'booking_id': booking_id,
+            },
+            token=token,
+        )
+        response = messaging.send(message)
+        logger.info(f'Notificacion enviada con exito a token {token[:10]}...: {response}')
+        return True
+    except firebase_admin.exceptions.UnregisteredError:
+        logger.warning(f"El token FCM {token[:10]}... ya no esta registrado. Deberia ser eliminado de la DB.")
+        return False
+    except Exception as e:
+        logger.error(f"Error al enviar notificacion a token {token:[:10]}...: {e}", exc_info=True)
+        return False
+
+@router.post("/admin/notify-user")
+async def notify_user(
+    request_body: NotificationRequest,
+    current_admin_user: User = Depends(get_current_admin_user)
+):
+    logger.info(f"Admin {current_admin_user.id} intentando notificar al usuario {request_body.user_id}")
+
+    try:
+        profile_response = supabase.from_('profiles').select('fcm_token').eq('id', request_body.user_id).single().execute()
+
+        if not profile_response.data or profile_response.data.get('fcm_token') is None:
+            logger.warning(f"No se encontro fcm_token para el usuario {request_body.user_id}. No se puede enviar notificacion.")
+            return JSONResponse(content={"sent": False, "reason": "FCM token not found"}, status_code=404)
+        
+        fcm_token = profile_response.data['fcm_token']
+
+        success = await _send_fcm_notification(
+            token=fcm_token,
+            title=request_body.title,
+            body=request_body.body,
+            booking_id=request_body.booking_id,
+        )
+
+        if success:
+            return JSONResponse(content={'sent': True}, status_code=200)
+        else:
+            raise HTTPException(status_code=500, detail="Failed to send notificacion via FCM")
+        
+    except Exception as e:
+        logger.error(f'Error en el endpoint /admin/notify-user: {e}', exc_info=True)
+        raise HTTPException(status_code=500, detail=str(e))   
+
+# --- LÓGICA DE GESTIÓN DE USUARIOS ---
+@router.delete("/admin/users/{user_id}") 
 async def delete_user_by_admin(user_id: str, current_admin_user: User = Depends(get_current_admin_user)):
 
     logger.info(f"Admin user {current_admin_user.id} attempting to delete user {user_id}")
@@ -420,9 +351,9 @@ async def delete_user_by_admin(user_id: str, current_admin_user: User = Depends(
     except Exception as e:
         logger.error(f"Unexpected Error deleting user {user_id}: {e}", exc_info=True)
         raise HTTPException(status_code=500, detail=f"An unexpected error occurred while deleting user: {e}")
-
-# --- Endpoint para Crear Payment Intent ---
-@app.post("/create-payment-intent")
+    
+# --- LÓGICA DE PAGOS ---
+@router.post("/create-payment-intent")
 async def create_payment_intent(
     request_body: CreatePaymentIntentRequest,
     current_user: User = Depends(get_current_user) 
@@ -495,37 +426,3 @@ async def create_payment_intent(
     except Exception as e:
         logger.error(f"Error creating Payment Intent for booking {request_body.bookingId}: {e}", exc_info=True)
         raise HTTPException(status_code=500, detail=str(e))
-
-# --- Endpoint para que el admin pueda enviar notificaciones
-@app.post("/admin/notify-user")
-async def notify_user(
-    request_body: NotificationRequest,
-    current_admin_user: User = Depends(get_current_admin_user)
-):
-    logger.info(f"Admin {current_admin_user.id} intentando notificar al usuario {request_body.user_id}")
-
-    try:
-        profile_response = supabase.from_('profiles').select('fcm_token').eq('id', request_body.user_id).single().execute()
-
-        if not profile_response.data or profile_response.data.get('fcm_token') is None:
-            logger.warning(f"No se encontro fcm_token para el usuario {request_body.user_id}. No se puede enviar notificacion.")
-            return JSONResponse(content={"sent": False, "reason": "FCM token not found"}, status_code=404)
-        
-        fcm_token = profile_response.data['fcm_token']
-
-        success = await _send_fcm_notification(
-            token=fcm_token,
-            title=request_body.title,
-            body=request_body.body,
-            booking_id=request_body.booking_id,
-        )
-
-        if success:
-            return JSONResponse(content={'sent': True}, status_code=200)
-        else:
-            raise HTTPException(status_code=500, detail="Failed to send notificacion via FCM")
-        
-    except Exception as e:
-        logger.error(f'Error en el endpoint /admin/notify-user: {e}', exc_info=True)
-        raise HTTPException(status_code=500, detail=str(e))
-
